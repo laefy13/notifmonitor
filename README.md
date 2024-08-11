@@ -36,8 +36,6 @@ Go to the project directory
   cd notifmonitor
 ```
 
-* No docker
-
 Install dependencies
 
 ```bash
