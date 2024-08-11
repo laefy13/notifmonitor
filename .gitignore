@@ -1,0 +1,16 @@
+./*
+__pycache__/
+*.html
+*.mp4
+*.jpg
+*.png
+*.jfif
+*.log
+*.json
+*.txt
+*.crt
+*.key
+*.pem
+match.py
+test.py 
+tail_.py 
