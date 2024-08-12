@@ -65,7 +65,7 @@ if __name__ == "__main__":
         help="path of the log file",
     )
     parser.add_argument(
-        "--worker", type=int, default=5, help="number of workers/chrome windows"
+        "--workers", type=int, default=5, help="number of workers/chrome windows"
     )
     args = parser.parse_args()
 
