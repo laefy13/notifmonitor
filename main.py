@@ -64,10 +64,14 @@ if __name__ == "__main__":
         type=str,
         help="path of the log file",
     )
+    parser.add_argument(
+        "--worker", type=int, default=5, help="number of workers/chrome windows"
+    )
     args = parser.parse_args()
 
     log_file_path = args.path
     bmob_path = args.bmob_path
+    workers = args.workers
 
     logfile = open(
         log_file_path,
@@ -76,7 +80,7 @@ if __name__ == "__main__":
     )
     loglines = follow(logfile)
 
-    scraper = Scraper(bmob_path=bmob_path)
+    scraper = Scraper(workers=workers, bmob_path=bmob_path)
     getCached(log_file_path, scraper)
     for line in loglines:
         scrapeNew(line, bmob_path, scraper)
