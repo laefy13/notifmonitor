@@ -48,7 +48,7 @@ Go to the project directory
 Install dependencies
 
 ```bash
-  pip install selenium_stealth requests
+  pip install -r requirements.txt
 ```
 Run script
 ```bash
