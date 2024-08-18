@@ -14,3 +14,5 @@ __pycache__/
 match.py
 test.py 
 tail_.py 
+*.db*
+.log

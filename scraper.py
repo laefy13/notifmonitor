@@ -20,10 +20,15 @@ from PIL import Image
 from io import BytesIO
 
 
+from dbManager import DB
+from monitor import profiler
+
+
 class Scraper:
     def __init__(
         self,
         workers,
+        max_retries,
         bmob_path=r"C:\Users\fy\Desktop\browsermob-proxy-2.1.4\bin\browsermob-proxy",
     ):
         self.browsermob_proxy_path = bmob_path
@@ -60,8 +65,28 @@ class Scraper:
 
         self.q = Queue()
         self.is_running = False
-        self.workers = workers
+        self.db = DB()
+        self.max_retries = max_retries
 
+        self.executor = ThreadPoolExecutor(max_workers=workers)
+        self.keep_running = True
+        self._start_worker_threads(workers)
+
+    def _start_worker_threads(self, workers):
+        for _ in range(workers):
+            self.executor.submit(self.worker)
+
+    def shutdown(self):
+
+        self.keep_running = False
+        print("Putting nones...")
+        for _ in range(self.executor._max_workers):
+            self.q.put(None)
+
+        print("Waiting for other tasks to finish first...")
+        self.executor.shutdown(wait=True)
+
+    # @profiler
     def driverInit(self):
 
         user_agent = random.choice(self.user_agents)
@@ -70,9 +95,8 @@ class Scraper:
         webgl_vendor = random.choice(self.webgl_vendors)
         renderer = random.choice(self.renderers)
 
-        server = Server(self.browsermob_proxy_path)
+        server = Server(self.browsermob_proxy_path, options={"quiet": True})
         server.start()
-        proxy = server.create_proxy()
         proxy = server.create_proxy(params={"trustAllServers": "true"})
 
         options = webdriver.ChromeOptions()
@@ -105,7 +129,7 @@ class Scraper:
         )
         return driver, proxy
 
-    def check_ip(self):
+    def checkIp(self):
         driver = self.driverInit()
         driver.get("https://api.ipify.org?format=json")
         time.sleep(20)
@@ -128,167 +152,243 @@ class Scraper:
                     "-bsf:a",
                     "aac_adtstoasc",
                     output_file,
-                ]
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
             )
             print(f"Conversion successful! Output file: {output_file}")
         except Exception as e:
             print(f"Error during conversion: {e}")
 
+    # @profiler
     def addToQueue(self, url):
-        if self.is_running:
+
+        try:
             self.q.put(url)
-        else:
-            self.startScraping([url])
+            print("added to  queue")
+        except Exception as e:
+            print(f"add to q error: {e}")
 
+    # @profiler
     def worker(self):
-        while True:
-            url = self.q.get()
-            if url is None:
-                break
-            self.getContents(url)
-            self.q.task_done()
+        try:
 
-    def startScraping(self, urls):
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            self.is_running = True
-            for _ in range(self.workers):
-                executor.submit(self.worker)
+            while self.keep_running:
+                print("u sure g that its blocked?")
+                q_item = self.q.get()
+                print("bruh is this real, like on a stack?")
+                if q_item is None:
+                    break
+                try:
+                    if isinstance(q_item, dict):
+                        _, value = q_item.popitem()
+                        if value == "image":
+                            print("going to save images...")
+                            self.saveImages(q_item)
+                        elif value == "video":
+                            print("going to save videos...")
+                            self.saveVideos(q_item)
+                        else:
+                            print("how")
 
-            for url in urls:
-                self.q.put(url)
+                    self.getContents(q_item)
+                    print(f"{q_item}, task done")
+                finally:
+                    self.q.task_done()
+                    print(f"{q_item}, task done nahh thas frfr ong")
+            print("worker 2 Queue contents:", list(self.q.queue))
 
-            self.q.join()
-
-            for _ in range(self.workers):
-                self.q.put(None)
-        self.is_running = False
+        except Exception as e:
+            print(f"worker error: {e}")
 
     def jfifToJpeg(self, image, file_name):
         image = Image.open(BytesIO(image))
         image.save(file_name, "JPEG")
 
+    def isSaved(self, url):
+        if self.db.urlSaved(url):
+            return True
+        return False
+
+    def saveImages(self, image_urls: dict):
+        print("inside save images func...")
+        for file_name, img_link in image_urls.items():
+            response = requests.get(img_link)
+            self.jfifToJpeg(response.content, file_name)
+
+    def saveVideos(self, video_urls: dict):
+        print("inside save videos func...")
+        for file_name, video_link in video_urls:
+            self.convert_m3u8_to_mp4(video_link, file_name)
+
+    @profiler
     def getContents(
         self,
         url,
     ):
-        url = f"https://x.com{url}"
-        wait_time = 15
-        contents = {}
-        driver, proxy = self.driverInit()
-        driver.get(url)
-
-        time.sleep(wait_time)
-        post_id = url.split("/")[-1]
-        if not os.path.exists(post_id):
-            os.mkdir(post_id)
-        out_path = f"./{post_id}"
-        contents["PostId"] = post_id
-        # text
         try:
-            tweet_div = driver.find_element(By.XPATH, '//div[@data-testid="tweetText"]')
-            tweet_text = tweet_div.text
-            contents["tweet"] = tweet_text
-        except Exception as e:
-            print(f"guess no text?")
+            if self.db.urlSaved(url):
+                print(f"{url} is already saved! ")
+                return
+            url_split = url.split("/")
+            profile_name = url_split[1]
+            print(url_split)
+            post_id = url_split[-1]
+            out_path = os.path.join(profile_name, post_id)
+            if not os.path.exists(out_path):
+                os.makedirs(out_path)
+            print(f"outpath: {out_path}")
 
-            html_content = driver.page_source
-            with open(f"{out_path}/text_error.html", "w", encoding="utf-8") as file:
+            url = f"https://x.com{url}"
+            wait_time = 15
+            contents = {}
+            driver, proxy = self.driverInit()
+            driver.get(url)
 
-                file.write(html_content)
+            time.sleep(wait_time)
 
-        # images
-        images_names = []
-        print(f"getting images of post: {post_id}...")
-        for count in range(1, 5):
+            # post not found / deleted or account is private or internet issues:
+            for _ in range(self.max_retries):
+                try:
+                    reloading_element = driver.find_element(
+                        By.XPATH,
+                        '//span[contains(text(), "Something went wrong. Try reloading.")]',
+                    )
+                    if reloading_element:
+                        print(
+                            "post not found / deleted or account is private or internet issues!"
+                        )
+                        driver.refresh()
+                except:
+                    print("post found!")
+                    break
+
+            contents["PostId"] = post_id
+
+            # text
             try:
-                img_a = driver.find_element(
-                    By.XPATH, f'//a[@href="{url[13:]}/photo/{count}"]'
+                tweet_div = driver.find_element(
+                    By.XPATH, '//div[@data-testid="tweetText"]'
                 )
-            except:
-                print("images get! ...or nah?")
-                break
-            img_img = img_a.find_element(By.TAG_NAME, "img")
-            img_link = img_img.get_attribute("src")
-            response = requests.get(img_link)
+                tweet_text = tweet_div.text
+                contents["tweet"] = tweet_text
+            except Exception as e:
+                print(f"guess no text?")
 
-            file_name = f"{out_path}/{post_id}-{uuid.uuid4()}.jfif"
+                html_content = driver.page_source
+                with open(f"{out_path}/text_error.html", "w", encoding="utf-8") as file:
 
-            self.jfifToJpeg(response.content, file_name)
-            images_names.append(file_name)
-        contents["images"] = images_names
-        print("images saved")
+                    file.write(html_content)
 
-        # html
-        html_content = driver.page_source
-        with open(f"{out_path}/{post_id}.html", "w", encoding="utf-8") as file:
-            file.write(html_content)
-        contents["html"] = f"{post_id}.html"
-
-        # VIDEOS
-        videos_urls = []
-
-        def scrollToEl(el, driver):
-            driver.execute_script("arguments[0].scrollIntoView(true);", el)
-
-        def pause_video(driver):
-            video_pause = driver.find_element(By.XPATH, '//button[@aria-label="Pause"]')
-            scrollToEl(video_pause, driver)
-            video_pause.click()
-
-        try:
-            print("trying to get videos...")
-            videos_el = driver.find_elements(By.TAG_NAME, "video")
-            videos_el_len = len(videos_el)
-            if videos_el_len > 1:
-
-                pause_video(driver)
-                for _ in range(5):
-                    driver.find_element(By.TAG_NAME, "body").send_keys(
-                        Keys.CONTROL, Keys.SUBTRACT
+            # images
+            image_urls = {}
+            print(f"getting images of post: {post_id}...")
+            for count in range(1, 5):
+                try:
+                    img_a = driver.find_element(
+                        By.XPATH, f'//a[@href="{url[13:]}/photo/{count}"]'
                     )
-                print(f"video:{videos_el}")
-                videos_el = videos_el[1:]
+                except:
+                    if count > 1:
+                        print("images get! ...or nah?")
+                    if count < 2:
+                        print("no images! i think")
+                    break
+                img_img = img_a.find_element(By.TAG_NAME, "img")
+                img_link = img_img.get_attribute("src")
+                file_name = os.path.join(out_path, f"{post_id}-{uuid.uuid4()}.jpg")
 
-                for video_el in videos_el:
-                    driver.execute_script(
-                        "window.scrollTo(0, arguments[0].getBoundingClientRect().top + window.pageYOffset);",
-                        video_el,
-                    )
-                    driver.execute_script("arguments[0].click();", video_el)
-                    pause_video(driver)
+                image_urls[file_name] = img_link
 
-            har_data = proxy.har
-            m3u_url = None
-            for entry in har_data["log"]["entries"]:
-                request = entry["request"]
-                if ".m3u8?" in request["url"]:
-                    m3u_url = request["url"]
-                    print(m3u_url)
-                    videos_urls.append(m3u_url)
-                    self.convert_m3u8_to_mp4(
-                        m3u_url, f"{out_path}/{post_id}-{uuid.uuid1()}.mp4"
-                    )
-        except Exception as e:
-            print(e)
+            contents["images"] = image_urls
+            if image_urls:
+                image_urls["__type__"] = "image"
+                self.q.put(image_urls)
+
+            # html
             html_content = driver.page_source
-            with open(f"{out_path}/videos_error.html", "w", encoding="utf-8") as file:
+            with open(
+                os.path.join(out_path, f"{post_id}.html"), "w", encoding="utf-8"
+            ) as file:
                 file.write(html_content)
             contents["html"] = f"{post_id}.html"
-            print(f"no video?")
-        contents["video_urls"] = videos_urls
 
-        # save the info
-        file_name = "contents.json"
-        temp = []
-        if os.path.exists(file_name):
-            with open(file_name, "r") as json_file:
-                temp = json.load(json_file)
+            # VIDEOS
+            def scrollToEl(el, driver):
+                driver.execute_script("arguments[0].scrollIntoView(true);", el)
 
-        temp.append(contents)
+            def pause_video(driver):
+                video_pause = driver.find_element(
+                    By.XPATH, '//button[@aria-label="Pause"]'
+                )
+                scrollToEl(video_pause, driver)
+                video_pause.click()
 
-        with open(file_name, "w") as json_file:
-            json.dump(temp, json_file, indent=4)
+            video_urls = {}
+            try:
+                print("trying to get videos...")
+                videos_el = driver.find_elements(By.TAG_NAME, "video")
+                videos_el_len = len(videos_el)
+                if videos_el_len > 1:
 
-        with open("saved.txt", "a", encoding="utf-8") as file:
-            file.write(f"\n{url[13:]}")
-        driver.quit()
+                    pause_video(driver)
+                    for _ in range(5):
+                        driver.find_element(By.TAG_NAME, "body").send_keys(
+                            Keys.CONTROL, Keys.SUBTRACT
+                        )
+                    print(f"video:{videos_el}")
+                    videos_el = videos_el[1:]
+
+                    for video_el in videos_el:
+                        driver.execute_script(
+                            "window.scrollTo(0, arguments[0].getBoundingClientRect().top + window.pageYOffset);",
+                            video_el,
+                        )
+                        driver.execute_script("arguments[0].click();", video_el)
+                        pause_video(driver)
+
+                har_data = proxy.har
+                m3u_url = None
+                for entry in har_data["log"]["entries"]:
+                    request = entry["request"]
+                    if ".m3u8?" in request["url"]:
+                        m3u_url = request["url"]
+
+                        video_urls[
+                            os.path.join(out_path, f"{post_id}-{uuid.uuid1()}.mp4")
+                        ] = m3u_url
+
+            except Exception as e:
+                html_content = driver.page_source
+                with open(
+                    os.path.join(out_path, f"videos_error.html"), "w", encoding="utf-8"
+                ) as file:
+                    file.write(html_content)
+                print(f"no video?")
+            contents["video_urls"] = video_urls
+            if video_urls:
+                video_urls["__type__"] = "video"
+                self.q.put(video_urls)
+
+            # save the info
+            file_name = os.path.join(out_path, "contents.json")
+            temp = []
+            if os.path.exists(file_name):
+                with open(file_name, "r") as json_file:
+                    temp = json.load(json_file)
+
+            temp.append(contents)
+            with open(file_name, "w") as json_file:
+                json.dump(temp, json_file, indent=4)
+
+            self.db.insert(url)
+
+            driver.quit()
+            proxy.close()
+            print("driver quit and proxy off")
+        except Exception as e:
+            driver.quit()
+            proxy.close()
+            print("driver quit and proxy off but error")
+            print(f"cnontents error: {e}")
